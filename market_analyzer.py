@@ -26,9 +26,8 @@ from ddgs import DDGS
 PROFIT_MARGIN_PERCENT = 0.60  # 60% du prix d'achat
 PROFIT_MARGIN_FIXED = 1000    # 1000€ minimum de bénéfice
 
-# Seuil anti-faux positifs:
-# Si le profit dépasse 200% du prix d'achat, c'est probablement une erreur d'estimation
-MAX_PROFIT_PERCENT = 2.0  # 200% max (au-delà = estimation douteuse)
+# Prix minimum pour considérer une annonce (éviter les annonces douteuses)
+MIN_AD_PRICE = 500  # Ignorer les annonces < 500€
 
 # =============================================================================
 # STRUCTURES DE DONNÉES
@@ -207,6 +206,17 @@ def analyze_deal(ad_price: float, market_price: Optional[float], sources: list[s
     Returns:
         MarketAnalysis avec les résultats
     """
+    # Vérifier le prix minimum
+    if ad_price < MIN_AD_PRICE:
+        return MarketAnalysis(
+            ad_price=ad_price,
+            market_price=market_price,
+            price_sources=sources,
+            potential_profit=None,
+            is_good_deal=False,
+            reason=f"Prix trop bas ({ad_price:.0f}€ < {MIN_AD_PRICE}€ minimum)"
+        )
+
     if market_price is None:
         return MarketAnalysis(
             ad_price=ad_price,
@@ -225,25 +235,18 @@ def analyze_deal(ad_price: float, market_price: Optional[float], sources: list[s
     required_profit_abs = PROFIT_MARGIN_FIXED                   # ex: 1000€ minimum
     min_required_profit = max(required_profit_pct, required_profit_abs)
 
-    # Vérifier si le profit est réaliste (anti-faux positifs)
+    # Ratio de profit pour affichage
     profit_ratio = potential_profit / ad_price if ad_price > 0 else 0
-    is_realistic = profit_ratio <= MAX_PROFIT_PERCENT
 
     # Bonne affaire seulement si:
     # - profit >= 60% du prix d'achat
     # - ET profit >= 1000€
-    # - ET profit <= 200% (sinon estimation douteuse)
-    is_good_deal = potential_profit >= min_required_profit and is_realistic
+    is_good_deal = potential_profit >= min_required_profit
 
     if is_good_deal:
         reason = (
             f"PEPITE! Profit potentiel: {potential_profit:.0f}€ "
             f"({profit_ratio*100:.0f}%, min requis: {min_required_profit:.0f}€)"
-        )
-    elif not is_realistic:
-        reason = (
-            f"Estimation douteuse: profit de {profit_ratio*100:.0f}% (>{MAX_PROFIT_PERCENT*100:.0f}% max). "
-            "Le prix de marché estimé semble incorrect."
         )
     else:
         missing_value = max(0.0, min_required_profit - potential_profit)

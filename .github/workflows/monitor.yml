@@ -1,0 +1,75 @@
+# Workflow GitHub Actions pour le moniteur LeBonCoin
+# Exécute le script toutes les 15 minutes et sauvegarde l'état
+#
+# Secrets requis:
+#   - DISCORD_WEBHOOK_URL: URL du webhook Discord
+#   - RAPIDAPI_KEY: Clé API RapidAPI (quand vous implémenterez fetch_data())
+
+name: Monitor LeBonCoin
+
+on:
+  # Exécution automatique toutes les 15 minutes
+  schedule:
+    - cron: '*/15 * * * *'
+
+  # Permet l'exécution manuelle depuis l'interface GitHub
+  workflow_dispatch:
+    inputs:
+      simulate:
+        description: 'Mode simulation (données fictives)'
+        required: false
+        default: 'false'
+        type: boolean
+
+# Empêche les exécutions concurrentes pour éviter les conflits sur seen_ads.json
+concurrency:
+  group: leboncoin-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    # Permissions pour pousser les changements (seen_ads.json)
+    permissions:
+      contents: write
+
+    steps:
+      # 1. Checkout du repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Configuration Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # 3. Installation des dépendances
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install requests
+
+      # 4. Exécution du moniteur
+      - name: Run monitor
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        run: |
+          if [ "${{ github.event.inputs.simulate }}" == "true" ]; then
+            python monitor.py --simulate
+          else
+            python monitor.py
+          fi
+
+      # 5. Commit et push des changements (seen_ads.json)
+      - name: Commit changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/seen_ads.json
+          git diff --staged --quiet || git commit -m "Update seen_ads.json [skip ci]"
+          git push

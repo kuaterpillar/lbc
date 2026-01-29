@@ -73,6 +73,10 @@ def main():
             print("[SKIP] Prix non disponible")
             continue
 
+        if ad.price < 500:
+            print(f"[SKIP] Prix trop bas ({ad.price}€ < 500€)")
+            continue
+
         # Analyse de marché via DuckDuckGo
         print(f"[...] Analyse du prix de marché (année: {year or 'N/A'})...")
 
