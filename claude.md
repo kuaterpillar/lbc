@@ -109,9 +109,56 @@ ad = client.get_ad(123456789)
 print(ad.user.name)  # lazy load
 ```
 
+## GitHub Actions Workflow
+
+Le projet inclut un workflow GitHub Actions qui surveille LeBonCoin automatiquement.
+
+**Fichier:** `.github/workflows/monitor.yml`
+
+**Fonctionnement:**
+1. Exécution automatique toutes les 15 minutes (cron)
+2. Recherche les nouvelles annonces via `monitor.py`
+3. Analyse de marché DuckDuckGo pour chaque annonce
+4. Détection des pépites (marge ≥60% ET ≥1000€)
+5. Envoi notifications Discord (webhook)
+6. Sauvegarde des annonces vues dans `data/seen_ads.json`
+
+**Secrets GitHub requis:**
+- `DISCORD_WEBHOOK_URL` : URL du webhook Discord
+
+**Secrets optionnels (proxy):**
+- `LBC_PROXY_HOST`, `LBC_PROXY_PORT`
+- `LBC_PROXY_USER`, `LBC_PROXY_PASS`
+
+**Exécution manuelle:**
+```bash
+# Via GitHub CLI
+gh workflow run monitor.yml --field simulate=true
+
+# Localement
+python monitor.py --simulate
+```
+
+## Configuration des Recherches
+
+Modifier `SEARCH_CONFIG` dans `monitor.py`:
+
+```python
+SEARCH_CONFIG = {
+    "text": "honda",
+    "category": lbc.Category.VEHICULES_MOTOS,
+    "sort": lbc.Sort.NEWEST,
+    "price": [1000, 10000],           # Fourchette prix
+    "regdate": [2016, 2025],          # Années
+    "cubic_capacity": [1400, 1600],   # Cylindrée (motos)
+    "locations": lbc.Region.ILE_DE_FRANCE,
+}
+```
+
 ## Important Notes
 
 - **Python 3.10+ requis** : le code utilise `match/case` malgré `requires-python = ">=3.9"` dans pyproject.toml
 - **Proxy résidentiel français recommandé** : pour éviter les blocages Datadome
 - **Impersonation** : navigateur aléatoire (safari, chrome_android, firefox, safari_ios) si non spécifié
+- **Prix minimum** : les annonces < 500€ sont ignorées par l'analyse de marché
 

@@ -28,6 +28,7 @@ import requests
 
 # Import de la librairie lbc du projet
 import lbc
+from market_analyzer import analyze_ad, MarketAnalysis, MIN_AD_PRICE
 
 # =============================================================================
 # CONFIGURATION
@@ -38,6 +39,9 @@ SEEN_ADS_FILE = Path(__file__).parent / "data" / "seen_ads.json"
 
 # URL du webhook Discord (à configurer via variable d'environnement)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+
+# Activer l'analyse de marché pour détecter les pépites
+MARKET_ANALYSIS_ENABLED = True
 
 
 # =============================================================================
@@ -303,21 +307,31 @@ def get_attribute_value(ad: lbc.Ad, key: str) -> str | None:
     return None
 
 
-def format_discord_message(ad: lbc.Ad) -> dict:
+def format_discord_message(ad: lbc.Ad, market: MarketAnalysis | None = None) -> dict:
     """
     Formate une annonce en message Discord (embed).
 
     Args:
         ad: Objet Ad contenant les données de l'annonce.
+        market: Résultat de l'analyse de marché (optionnel).
 
     Returns:
         Payload JSON pour l'API Discord webhooks.
     """
+    is_pepite = market and market.is_good_deal
+
     # Construction de la description
     description_parts = []
 
     if ad.price:
         description_parts.append(f"**Prix:** {int(ad.price)} EUR")
+
+    # Ajouter infos marché si disponible
+    if market and market.market_price:
+        description_parts.append(f"**Prix marché:** {int(market.market_price)} EUR")
+        if market.potential_profit:
+            profit_str = f"+{int(market.potential_profit)}" if market.potential_profit > 0 else str(int(market.potential_profit))
+            description_parts.append(f"**Profit potentiel:** {profit_str} EUR")
 
     if ad.location and ad.location.city_label:
         description_parts.append(f"**Lieu:** {ad.location.city_label}")
@@ -332,13 +346,20 @@ def format_discord_message(ad: lbc.Ad) -> dict:
 
     description = "\n".join(description_parts)
 
-    # Embed Discord
+    # Embed Discord - couleur différente pour les pépites
+    if is_pepite:
+        title = f"💎 PÉPITE: {ad.title}"
+        color = 0xFFD700  # Or
+    else:
+        title = ad.title
+        color = 0x00AA00  # Vert
+
     embed = {
-        "title": ad.title,
+        "title": title,
         "url": ad.url,
         "description": description,
-        "color": 0x00AA00,  # Vert
-        "footer": {"text": "LeBonCoin Monitor"},
+        "color": color,
+        "footer": {"text": f"LeBonCoin Monitor | {market.reason if market else ''}"},
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -349,22 +370,58 @@ def format_discord_message(ad: lbc.Ad) -> dict:
     return {"embeds": [embed]}
 
 
-def send_discord_notification(ad: lbc.Ad) -> bool:
+def analyze_ad_market(ad: lbc.Ad) -> MarketAnalysis | None:
+    """
+    Analyse le prix de marché d'une annonce.
+
+    Args:
+        ad: Objet Ad.
+
+    Returns:
+        MarketAnalysis ou None si analyse impossible.
+    """
+    if not MARKET_ANALYSIS_ENABLED:
+        return None
+
+    if not ad.price or ad.price < MIN_AD_PRICE:
+        return None
+
+    year = get_attribute_value(ad, "regdate")
+    brand = ad.brand if hasattr(ad, "brand") else None
+
+    try:
+        return analyze_ad(
+            title=ad.title,
+            price=ad.price,
+            brand=brand,
+            year=year,
+            category="moto" if "moto" in ad.title.lower() else None,
+        )
+    except Exception as e:
+        print(f"[MARKET] Erreur analyse {ad.id}: {e}")
+        return None
+
+
+def send_discord_notification(ad: lbc.Ad, market: MarketAnalysis | None = None) -> bool:
     """
     Envoie une notification Discord pour une annonce.
 
     Args:
         ad: Objet Ad contenant les données de l'annonce.
+        market: Résultat de l'analyse de marché (optionnel).
 
     Returns:
         True si l'envoi a réussi, False sinon.
     """
+    is_pepite = market and market.is_good_deal
+
     if not DISCORD_WEBHOOK_URL:
         print("[WARN] DISCORD_WEBHOOK_URL non configure. Notification ignoree.")
-        print(f"  -> {ad.title} - {int(ad.price) if ad.price else 'N/A'} EUR")
+        pepite_tag = " [PEPITE]" if is_pepite else ""
+        print(f"  -> {ad.title}{pepite_tag} - {int(ad.price) if ad.price else 'N/A'} EUR")
         return False
 
-    payload = format_discord_message(ad)
+    payload = format_discord_message(ad, market)
 
     try:
         response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
@@ -417,16 +474,30 @@ def main(simulate: bool = False) -> int:
     new_ads = filter_new_ads(ads, seen_ids)
     print(f"[INFO] {len(new_ads)} nouvelle(s) annonce(s) detectee(s)")
 
-    # 4. Envoyer les notifications Discord
+    # 4. Analyser et envoyer les notifications Discord
     if new_ads:
         success_count = 0
+        pepite_count = 0
+
         for ad in new_ads:
-            if send_discord_notification(ad):
+            # Analyse de marché si activée
+            market = None
+            if MARKET_ANALYSIS_ENABLED and ad.price and ad.price >= MIN_AD_PRICE:
+                print(f"[MARKET] Analyse de {ad.title[:40]}...")
+                market = analyze_ad_market(ad)
+                if market and market.is_good_deal:
+                    pepite_count += 1
+                    print(f"[PEPITE] {ad.title} - Profit: {int(market.potential_profit)}€")
+
+            if send_discord_notification(ad, market):
                 success_count += 1
+
             # Ajouter l'ID aux annonces vues
             seen_ids.add(str(ad.id))
 
         print(f"[INFO] {success_count}/{len(new_ads)} notification(s) envoyee(s)")
+        if MARKET_ANALYSIS_ENABLED:
+            print(f"[INFO] {pepite_count} pepite(s) detectee(s)")
     else:
         print("[INFO] Aucune nouvelle annonce a notifier")
 
