@@ -1,9 +1,13 @@
 # Workflow GitHub Actions pour le moniteur LeBonCoin
 # Exécute le script toutes les 15 minutes et sauvegarde l'état
+# Les recherches sont configurées via le bot Discord (data/searches.json)
 #
 # Secrets requis:
 #   - DISCORD_WEBHOOK_URL: URL du webhook Discord
-#   - RAPIDAPI_KEY: Clé API RapidAPI (quand vous implémenterez fetch_data())
+#
+# Secrets optionnels (proxy):
+#   - LBC_PROXY_HOST, LBC_PROXY_PORT
+#   - LBC_PROXY_USER, LBC_PROXY_PASS
 
 name: Monitor LeBonCoin
 
@@ -57,7 +61,10 @@ jobs:
       - name: Run monitor
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          LBC_PROXY_HOST: ${{ secrets.LBC_PROXY_HOST }}
+          LBC_PROXY_PORT: ${{ secrets.LBC_PROXY_PORT }}
+          LBC_PROXY_USER: ${{ secrets.LBC_PROXY_USER }}
+          LBC_PROXY_PASS: ${{ secrets.LBC_PROXY_PASS }}
         run: |
           if [ "${{ github.event.inputs.simulate }}" == "true" ]; then
             python monitor.py --simulate
@@ -65,11 +72,11 @@ jobs:
             python monitor.py
           fi
 
-      # 5. Commit et push des changements (seen_ads.json)
+      # 5. Commit et push des changements (seen_*.json)
       - name: Commit changes
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add data/seen_ads.json
-          git diff --staged --quiet || git commit -m "Update seen_ads.json [skip ci]"
+          git add data/seen_*.json
+          git diff --staged --quiet || git commit -m "Update seen ads [skip ci]"
           git push

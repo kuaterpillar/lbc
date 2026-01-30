@@ -34,8 +34,8 @@ from market_analyzer import analyze_ad, MarketAnalysis, MIN_AD_PRICE
 # CONFIGURATION
 # =============================================================================
 
-# Chemin vers le fichier de stockage des annonces déjà vues
-SEEN_ADS_FILE = Path(__file__).parent / "data" / "seen_ads.json"
+# Répertoire de stockage des annonces déjà vues (un fichier par recherche)
+DATA_DIR = Path(__file__).parent / "data"
 
 # URL du webhook Discord (à configurer via variable d'environnement)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -45,17 +45,74 @@ MARKET_ANALYSIS_ENABLED = True
 
 
 # =============================================================================
-# CONFIGURATION DE LA RECHERCHE
+# CONFIGURATION DES RECHERCHES (depuis Discord Bot)
 # =============================================================================
-# Modifiez ces paramètres selon vos critères de recherche
 
-SEARCH_CONFIG = {
-    "text": "honda",  # Texte de recherche
-    "category": lbc.Category.VEHICULES_MOTOS,  # Catégorie (voir lbc/model/enums.py)
-    "sort": lbc.Sort.NEWEST,  # Tri par date (plus récent d'abord)
-    # "price": [1000, 10000],                 # Fourchette de prix (décommenter si besoin)
-    # "locations": [lbc.City(...)],           # Localisation (décommenter si besoin)
+SEARCHES_FILE = Path(__file__).parent / "data" / "searches.json"
+
+# Catégories (même mapping que discord_bot.py)
+CATEGORIES = {
+    1: lbc.Category.TOUTES_CATEGORIES,
+    2: lbc.Category.VEHICULES_VOITURES,
+    3: lbc.Category.VEHICULES_MOTOS,
+    4: lbc.Category.IMMOBILIER_VENTES_IMMOBILIERES,
+    5: lbc.Category.IMMOBILIER_LOCATIONS,
+    6: lbc.Category.ELECTRONIQUE,
+    7: lbc.Category.ELECTRONIQUE_TELEPHONES_ET_OBJETS_CONNECTES,
+    8: lbc.Category.MAISON_ET_JARDIN_AMEUBLEMENT,
+    9: lbc.Category.VEHICULES_VELOS,
+    10: lbc.Category.ELECTRONIQUE_JEUX_VIDEO,
+    11: lbc.Category.ELECTRONIQUE_CONSOLES,
+    12: lbc.Category.ELECTRONIQUE_PHOTO_AUDIO_ET_VIDEO,
 }
+
+REGIONS = {
+    1: lbc.Region.ILE_DE_FRANCE,
+    2: lbc.Region.AUVERGNE_RHONE_ALPES,
+    3: lbc.Region.NOUVELLE_AQUITAINE,
+    4: lbc.Region.OCCITANIE,
+    5: lbc.Region.HAUTS_DE_FRANCE,
+    6: lbc.Region.PROVENCE_ALPES_COTE_DAZUR,
+    7: lbc.Region.GRAND_EST,
+    8: lbc.Region.PAYS_DE_LA_LOIRE,
+    9: lbc.Region.BRETAGNE,
+    10: lbc.Region.NORMANDIE,
+}
+
+
+def load_searches() -> dict:
+    """Charge les recherches depuis le fichier JSON créé par le bot Discord."""
+    if not SEARCHES_FILE.exists():
+        print("[WARN] Aucun fichier searches.json trouvé")
+        return {"searches": {}, "next_id": 1}
+    try:
+        with open(SEARCHES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[WARN] Erreur lecture searches.json: {e}")
+        return {"searches": {}, "next_id": 1}
+
+
+def build_search_params(search: dict) -> dict:
+    """Convertit une recherche du bot Discord en paramètres pour lbc.Client.search()."""
+    params = {
+        "text": search["text"],
+        "category": CATEGORIES.get(search["category_id"], lbc.Category.TOUTES_CATEGORIES),
+        "sort": lbc.Sort.NEWEST,
+    }
+
+    if search.get("price_min") or search.get("price_max"):
+        params["price"] = [search.get("price_min") or 0, search.get("price_max") or 999999999]
+
+    if search.get("region_id"):
+        region = REGIONS.get(search["region_id"])
+        if region:
+            params["locations"] = [region]
+
+    if search.get("year_min") or search.get("year_max"):
+        params["regdate"] = [search.get("year_min") or 1900, search.get("year_max") or 2100]
+
+    return params
 
 
 # =============================================================================
@@ -196,11 +253,13 @@ def get_proxy() -> lbc.Proxy | None:
     )
 
 
-def fetch_data() -> list[lbc.Ad]:
+def fetch_data(search_params: dict) -> list[lbc.Ad]:
     """
     Récupère les annonces depuis LeBonCoin via la librairie lbc.
 
-    Utilise les paramètres définis dans SEARCH_CONFIG.
+    Args:
+        search_params: Paramètres de recherche (text, category, price, etc.)
+
     La librairie gère automatiquement :
         - L'impersonation de navigateur (Safari, Chrome, Firefox)
         - Les retries sur erreur 403 Datadome
@@ -220,8 +279,8 @@ def fetch_data() -> list[lbc.Ad]:
     proxy = get_proxy()
     client = lbc.Client(proxy=proxy)
 
-    # Effectuer la recherche avec les paramètres configurés
-    result: lbc.Search = client.search(**SEARCH_CONFIG)
+    # Effectuer la recherche avec les paramètres fournis
+    result: lbc.Search = client.search(**search_params)
 
     return result.ads
 
@@ -231,38 +290,47 @@ def fetch_data() -> list[lbc.Ad]:
 # =============================================================================
 
 
-def load_seen_ads() -> set[str]:
+def get_seen_file(search_id: str) -> Path:
+    """Retourne le chemin du fichier des annonces vues pour une recherche."""
+    return DATA_DIR / f"seen_{search_id}.json"
+
+
+def load_seen_ads(search_id: str) -> set[str]:
     """
-    Charge les IDs des annonces déjà vues depuis le fichier JSON.
+    Charge les IDs des annonces déjà vues pour une recherche.
+
+    Args:
+        search_id: ID de la recherche.
 
     Returns:
         Ensemble des IDs d'annonces déjà notifiées.
     """
-    if not SEEN_ADS_FILE.exists():
+    seen_file = get_seen_file(search_id)
+    if not seen_file.exists():
         return set()
 
     try:
-        with open(SEEN_ADS_FILE, encoding="utf-8") as f:
+        with open(seen_file, encoding="utf-8") as f:
             data = json.load(f)
             return set(data.get("seen_ids", []))
     except (OSError, json.JSONDecodeError) as e:
-        print(f"[WARN] Erreur lecture {SEEN_ADS_FILE}: {e}")
+        print(f"[WARN] Erreur lecture {seen_file}: {e}")
         return set()
 
 
-def save_seen_ads(seen_ids: set[str]) -> None:
+def save_seen_ads(search_id: str, seen_ids: set[str]) -> None:
     """
-    Sauvegarde les IDs des annonces vues dans le fichier JSON.
+    Sauvegarde les IDs des annonces vues pour une recherche.
 
     Args:
+        search_id: ID de la recherche.
         seen_ids: Ensemble des IDs à sauvegarder.
     """
-    # Créer le dossier data/ s'il n'existe pas
-    SEEN_ADS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     data = {"seen_ids": list(seen_ids), "last_update": datetime.now().isoformat(), "count": len(seen_ids)}
 
-    with open(SEEN_ADS_FILE, "w", encoding="utf-8") as f:
+    with open(get_seen_file(search_id), "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
@@ -437,6 +505,69 @@ def send_discord_notification(ad: lbc.Ad, market: MarketAnalysis | None = None) 
 # =============================================================================
 
 
+def process_search(search_id: str, search: dict, simulate: bool = False) -> tuple[int, int, int]:
+    """
+    Traite une recherche individuelle.
+
+    Args:
+        search_id: ID de la recherche.
+        search: Configuration de la recherche.
+        simulate: Si True, utilise des données simulées.
+
+    Returns:
+        Tuple (nouvelles_annonces, notifications_envoyees, pepites_detectees)
+    """
+    print(f"\n[SEARCH #{search_id}] {search['text']}")
+
+    # 1. Récupérer les annonces
+    try:
+        if simulate:
+            ads = get_simulated_data()
+        else:
+            search_params = build_search_params(search)
+            ads = fetch_data(search_params)
+        print(f"  [INFO] {len(ads)} annonce(s) recuperee(s)")
+    except lbc.DatadomeError as e:
+        print(f"  [ERROR] Bloque par Datadome: {e}")
+        return 0, 0, 0
+    except Exception as e:
+        print(f"  [ERROR] Erreur: {e}")
+        return 0, 0, 0
+
+    # 2. Charger les annonces déjà vues pour cette recherche
+    seen_ids = load_seen_ads(search_id)
+    print(f"  [INFO] {len(seen_ids)} annonce(s) deja vue(s)")
+
+    # 3. Filtrer les nouvelles annonces
+    new_ads = filter_new_ads(ads, seen_ids)
+    print(f"  [INFO] {len(new_ads)} nouvelle(s) annonce(s)")
+
+    if not new_ads:
+        return 0, 0, 0
+
+    # 4. Analyser et envoyer les notifications
+    success_count = 0
+    pepite_count = 0
+
+    for ad in new_ads:
+        market = None
+        if MARKET_ANALYSIS_ENABLED and ad.price and ad.price >= MIN_AD_PRICE:
+            market = analyze_ad_market(ad)
+            if market and market.is_good_deal:
+                pepite_count += 1
+                print(f"  [PEPITE] {ad.title} - Profit: {int(market.potential_profit)}€")
+
+        if send_discord_notification(ad, market):
+            success_count += 1
+
+        seen_ids.add(str(ad.id))
+
+    # 5. Sauvegarder les annonces vues
+    save_seen_ads(search_id, seen_ids)
+
+    return len(new_ads), success_count, pepite_count
+
+
 def main(simulate: bool = False) -> int:
     """
     Point d'entrée principal du moniteur.
@@ -449,61 +580,38 @@ def main(simulate: bool = False) -> int:
     """
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Demarrage du moniteur...")
 
-    # 1. Récupérer les annonces
-    try:
-        if simulate:
-            print("[INFO] Mode simulation active")
-            ads = get_simulated_data()
-        else:
-            print(f"[INFO] Recherche: {SEARCH_CONFIG.get('text', '*')}")
-            ads = fetch_data()
-        print(f"[INFO] {len(ads)} annonce(s) recuperee(s)")
-    except lbc.DatadomeError as e:
-        print(f"[ERROR] Bloque par Datadome: {e}")
-        print("[HINT] Configurez un proxy residentiel francais via LBC_PROXY_*")
-        return 1
-    except Exception as e:
-        print(f"[ERROR] Erreur recuperation des annonces: {e}")
-        return 1
+    # Charger les recherches depuis le fichier créé par le bot Discord
+    searches_data = load_searches()
+    searches = searches_data.get("searches", {})
 
-    # 2. Charger les annonces déjà vues
-    seen_ids = load_seen_ads()
-    print(f"[INFO] {len(seen_ids)} annonce(s) deja vue(s)")
+    # Filtrer uniquement les recherches actives
+    active_searches = {sid: s for sid, s in searches.items() if s.get("active", False)}
 
-    # 3. Filtrer les nouvelles annonces
-    new_ads = filter_new_ads(ads, seen_ids)
-    print(f"[INFO] {len(new_ads)} nouvelle(s) annonce(s) detectee(s)")
+    if not active_searches:
+        print("[INFO] Aucune recherche active trouvee")
+        print("[HINT] Utilisez le bot Discord pour creer et activer des recherches")
+        return 0
 
-    # 4. Analyser et envoyer les notifications Discord
-    if new_ads:
-        success_count = 0
-        pepite_count = 0
+    print(f"[INFO] {len(active_searches)} recherche(s) active(s) sur {len(searches)} totale(s)")
 
-        for ad in new_ads:
-            # Analyse de marché si activée
-            market = None
-            if MARKET_ANALYSIS_ENABLED and ad.price and ad.price >= MIN_AD_PRICE:
-                print(f"[MARKET] Analyse de {ad.title[:40]}...")
-                market = analyze_ad_market(ad)
-                if market and market.is_good_deal:
-                    pepite_count += 1
-                    print(f"[PEPITE] {ad.title} - Profit: {int(market.potential_profit)}€")
+    # Traiter chaque recherche active
+    total_new = 0
+    total_sent = 0
+    total_pepites = 0
 
-            if send_discord_notification(ad, market):
-                success_count += 1
+    for search_id, search in active_searches.items():
+        new_ads, sent, pepites = process_search(search_id, search, simulate)
+        total_new += new_ads
+        total_sent += sent
+        total_pepites += pepites
 
-            # Ajouter l'ID aux annonces vues
-            seen_ids.add(str(ad.id))
-
-        print(f"[INFO] {success_count}/{len(new_ads)} notification(s) envoyee(s)")
-        if MARKET_ANALYSIS_ENABLED:
-            print(f"[INFO] {pepite_count} pepite(s) detectee(s)")
-    else:
-        print("[INFO] Aucune nouvelle annonce a notifier")
-
-    # 5. Sauvegarder les annonces vues
-    save_seen_ads(seen_ids)
-    print(f"[INFO] Etat sauvegarde ({len(seen_ids)} annonces)")
+    # Résumé
+    print(f"\n[RESUME]")
+    print(f"  - Recherches traitees: {len(active_searches)}")
+    print(f"  - Nouvelles annonces: {total_new}")
+    print(f"  - Notifications envoyees: {total_sent}")
+    if MARKET_ANALYSIS_ENABLED:
+        print(f"  - Pepites detectees: {total_pepites}")
 
     print("[OK] Termine")
     return 0

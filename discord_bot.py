@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-Bot Discord interactif pour surveiller les annonces LeBonCoin.
-Supporte plusieurs recherches simultanées.
+Bot Discord pour piloter le workflow GitHub Actions LeBonCoin.
+
+Ce bot ne fait PAS de monitoring lui-même. Il sert d'interface pour:
+- Créer/modifier/supprimer des recherches (stockées dans data/searches.json)
+- Déclencher le workflow GitHub Actions
+- Activer/désactiver des recherches
 
 Commandes:
     !aide              - Affiche l'aide
     !new               - Créer une nouvelle recherche
     !list              - Liste toutes les recherches
     !delete <id>       - Supprimer une recherche
-    !start <id>        - Démarrer une recherche
-    !stop <id>         - Arrêter une recherche
-    !startall          - Démarrer toutes les recherches
-    !stopall           - Arrêter toutes les recherches
-    !check <id>        - Vérification immédiate
+    !start <id>        - Activer une recherche
+    !stop <id>         - Désactiver une recherche
+    !startall          - Activer toutes les recherches
+    !stopall           - Désactiver toutes les recherches
+    !run               - Déclencher le workflow manuellement
+    !status            - Statut du dernier workflow
     !category          - Liste les catégories
     !region            - Liste les régions
+
+Variables d'environnement:
+    DISCORD_BOT_TOKEN  - Token du bot Discord
+    GITHUB_TOKEN       - Token GitHub (repo scope) pour déclencher les workflows
+    GITHUB_REPO        - Repo au format "owner/repo" (ex: "monuser/lbc-main")
 """
 
 import asyncio
@@ -24,43 +34,132 @@ from datetime import datetime
 from pathlib import Path
 
 import discord
-from discord.ext import commands, tasks
+import requests
+from discord.ext import commands
 
 import lbc
-from market_analyzer import analyze_ad, MarketAnalysis
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-# Activer/désactiver l'analyse de marché
-MARKET_ANALYSIS_ENABLED = True
-
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")  # format: "owner/repo"
 
-# Configuration Proxy (pour éviter les blocages Datadome)
-# Recommandé: proxies résidentiels français (Bright Data, Oxylabs, etc.)
-PROXY_HOST = os.environ.get("LBC_PROXY_HOST", "")
-PROXY_PORT = os.environ.get("LBC_PROXY_PORT", "")
-PROXY_USER = os.environ.get("LBC_PROXY_USER", "")
-PROXY_PASS = os.environ.get("LBC_PROXY_PASS", "")
-
-
-def get_proxy() -> lbc.Proxy | None:
-    """Retourne un proxy configuré ou None."""
-    if not PROXY_HOST or not PROXY_PORT:
-        return None
-    return lbc.Proxy(
-        host=PROXY_HOST,
-        port=int(PROXY_PORT),
-        username=PROXY_USER if PROXY_USER else None,
-        password=PROXY_PASS if PROXY_PASS else None
-    )
 DATA_DIR = Path(__file__).parent / "data"
 SEARCHES_FILE = DATA_DIR / "searches.json"
 
-# Intervalle de vérification en minutes
-CHECK_INTERVAL = 15
+
+# =============================================================================
+# GITHUB API
+# =============================================================================
+
+def github_headers() -> dict:
+    """Headers pour l'API GitHub."""
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+
+def trigger_workflow() -> tuple[bool, str]:
+    """
+    Déclenche le workflow GitHub Actions.
+
+    Returns:
+        (success, message)
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False, "GITHUB_TOKEN ou GITHUB_REPO non configuré"
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/monitor.yml/dispatches"
+
+    try:
+        resp = requests.post(
+            url,
+            headers=github_headers(),
+            json={"ref": "main"},
+            timeout=10,
+        )
+        if resp.status_code == 204:
+            return True, "Workflow déclenché avec succès"
+        return False, f"Erreur {resp.status_code}: {resp.text}"
+    except Exception as e:
+        return False, f"Erreur: {e}"
+
+
+def get_workflow_status() -> dict | None:
+    """
+    Récupère le statut du dernier workflow.
+
+    Returns:
+        Dict avec les infos du workflow ou None.
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return None
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/monitor.yml/runs"
+
+    try:
+        resp = requests.get(
+            url,
+            headers=github_headers(),
+            params={"per_page": 1},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("workflow_runs"):
+                return data["workflow_runs"][0]
+        return None
+    except Exception:
+        return None
+
+
+def commit_searches_to_github(searches_data: dict) -> tuple[bool, str]:
+    """
+    Commit le fichier searches.json sur GitHub.
+
+    Args:
+        searches_data: Données des recherches à sauvegarder.
+
+    Returns:
+        (success, message)
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False, "GITHUB_TOKEN ou GITHUB_REPO non configuré"
+
+    import base64
+
+    file_path = "data/searches.json"
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+
+    try:
+        # Récupérer le SHA actuel du fichier (s'il existe)
+        resp = requests.get(url, headers=github_headers(), timeout=10)
+        sha = resp.json().get("sha") if resp.status_code == 200 else None
+
+        # Préparer le contenu
+        content = json.dumps(searches_data, indent=2, ensure_ascii=False)
+        content_b64 = base64.b64encode(content.encode()).decode()
+
+        # Créer ou mettre à jour
+        payload = {
+            "message": "Update searches.json via Discord bot",
+            "content": content_b64,
+            "branch": "main",
+        }
+        if sha:
+            payload["sha"] = sha
+
+        resp = requests.put(url, headers=github_headers(), json=payload, timeout=10)
+
+        if resp.status_code in (200, 201):
+            return True, "Configuration synchronisée avec GitHub"
+        return False, f"Erreur {resp.status_code}: {resp.text}"
+    except Exception as e:
+        return False, f"Erreur: {e}"
 
 # Catégories principales
 CATEGORIES = {
@@ -107,11 +206,24 @@ def load_searches() -> dict:
         return {"searches": {}, "next_id": 1}
 
 
-def save_searches(data: dict) -> None:
-    """Sauvegarde les recherches."""
+def save_searches(data: dict, sync_github: bool = True) -> tuple[bool, str] | None:
+    """
+    Sauvegarde les recherches localement et sur GitHub.
+
+    Args:
+        data: Données des recherches.
+        sync_github: Si True, synchronise aussi avec GitHub.
+
+    Returns:
+        (success, message) si sync_github, sinon None.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(SEARCHES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+    if sync_github and GITHUB_TOKEN and GITHUB_REPO:
+        return commit_searches_to_github(data)
+    return None
 
 
 def get_seen_file(search_id: str) -> Path:
@@ -161,7 +273,7 @@ user_wizards = {}
 async def on_ready():
     print(f"[BOT] Connecté en tant que {bot.user}")
     print(f"[BOT] Serveurs: {[g.name for g in bot.guilds]}")
-    monitor_loop.start()
+    print(f"[BOT] GitHub Repo: {GITHUB_REPO or 'Non configuré'}")
 
 
 # =============================================================================
@@ -173,7 +285,7 @@ async def aide(ctx):
     """Affiche l'aide."""
     embed = discord.Embed(
         title="🔍 LeBonCoin Monitor - Aide",
-        description="Surveillez plusieurs recherches en même temps !",
+        description="Pilotez vos recherches LeBonCoin via GitHub Actions !",
         color=0x00AA00,
     )
     embed.add_field(
@@ -189,11 +301,19 @@ async def aide(ctx):
     embed.add_field(
         name="▶️ Contrôle",
         value=(
-            "`!start <id>` - Démarrer une recherche\n"
-            "`!stop <id>` - Arrêter une recherche\n"
-            "`!startall` - Tout démarrer\n"
-            "`!stopall` - Tout arrêter\n"
-            "`!check <id>` - Vérif immédiate"
+            "`!start <id>` - Activer une recherche\n"
+            "`!stop <id>` - Désactiver une recherche\n"
+            "`!startall` - Tout activer\n"
+            "`!stopall` - Tout désactiver"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🚀 GitHub Actions",
+        value=(
+            "`!run` - Déclencher le workflow maintenant\n"
+            "`!status` - Statut du dernier workflow\n"
+            "`!sync` - Synchroniser config avec GitHub"
         ),
         inline=False,
     )
@@ -205,15 +325,7 @@ async def aide(ctx):
         ),
         inline=False,
     )
-    embed.add_field(
-        name="🔒 Proxy",
-        value=(
-            "`!proxy` - Statut du proxy\n"
-            "`!testproxy` - Tester la connexion"
-        ),
-        inline=False,
-    )
-    embed.set_footer(text=f"Vérification automatique toutes les {CHECK_INTERVAL} minutes")
+    embed.set_footer(text="Le monitoring tourne sur GitHub Actions toutes les 15 min")
     await ctx.send(embed=embed)
 
 
@@ -241,54 +353,78 @@ async def region(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="proxy")
-async def proxy_status(ctx):
-    """Affiche le statut du proxy."""
-    proxy = get_proxy()
+@bot.command(name="run")
+async def run_workflow(ctx):
+    """Déclenche le workflow GitHub Actions manuellement."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        await ctx.send("❌ `GITHUB_TOKEN` ou `GITHUB_REPO` non configuré.")
+        return
 
-    if proxy:
-        embed = discord.Embed(
-            title="🔒 Proxy configuré",
-            color=0x00AA00,
-        )
-        embed.add_field(name="Host", value=f"`{PROXY_HOST}`", inline=True)
-        embed.add_field(name="Port", value=f"`{PROXY_PORT}`", inline=True)
-        embed.add_field(name="Auth", value="✅ Oui" if PROXY_USER else "❌ Non", inline=True)
-        embed.set_footer(text="Le proxy sera utilisé pour toutes les recherches")
+    await ctx.send("🚀 Déclenchement du workflow...")
+
+    success, message = trigger_workflow()
+    if success:
+        await ctx.send(f"✅ {message}\n📍 Le monitoring va s'exécuter dans quelques secondes.")
     else:
-        embed = discord.Embed(
-            title="⚠️ Aucun proxy configuré",
-            description="Sans proxy, tu risques d'être bloqué par Datadome.\n\n**Variables à configurer:**\n`LBC_PROXY_HOST`\n`LBC_PROXY_PORT`\n`LBC_PROXY_USER` (optionnel)\n`LBC_PROXY_PASS` (optionnel)",
-            color=0xFF0000,
-        )
-        embed.add_field(
-            name="🛒 Proxies recommandés",
-            value="• [Bright Data](https://brightdata.com) - Résidentiels FR\n• [Oxylabs](https://oxylabs.io) - Résidentiels FR\n• [IPRoyal](https://iproyal.com) - Budget friendly",
-            inline=False
-        )
+        await ctx.send(f"❌ {message}")
+
+
+@bot.command(name="status")
+async def workflow_status(ctx):
+    """Affiche le statut du dernier workflow."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        await ctx.send("❌ `GITHUB_TOKEN` ou `GITHUB_REPO` non configuré.")
+        return
+
+    run = get_workflow_status()
+    if not run:
+        await ctx.send("❌ Impossible de récupérer le statut.")
+        return
+
+    status_emoji = {
+        "completed": "✅",
+        "in_progress": "🔄",
+        "queued": "⏳",
+        "failure": "❌",
+        "cancelled": "🚫",
+    }.get(run.get("status"), "❓")
+
+    conclusion_emoji = {
+        "success": "✅",
+        "failure": "❌",
+        "cancelled": "🚫",
+    }.get(run.get("conclusion"), "")
+
+    embed = discord.Embed(
+        title="📊 Dernier workflow",
+        url=run.get("html_url"),
+        color=0x00AA00 if run.get("conclusion") == "success" else 0xFF0000,
+    )
+    embed.add_field(name="Status", value=f"{status_emoji} {run.get('status')}", inline=True)
+    if run.get("conclusion"):
+        embed.add_field(name="Résultat", value=f"{conclusion_emoji} {run.get('conclusion')}", inline=True)
+    embed.add_field(name="Démarré", value=run.get("created_at", "?")[:19].replace("T", " "), inline=True)
+    embed.set_footer(text=f"Run #{run.get('run_number')}")
 
     await ctx.send(embed=embed)
 
 
-@bot.command(name="testproxy")
-async def test_proxy(ctx):
-    """Teste la connexion avec le proxy."""
-    proxy = get_proxy()
-
-    if not proxy:
-        await ctx.send("❌ Aucun proxy configuré. Utilise `!proxy` pour voir comment configurer.")
+@bot.command(name="sync")
+async def sync_github(ctx):
+    """Synchronise la configuration avec GitHub."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        await ctx.send("❌ `GITHUB_TOKEN` ou `GITHUB_REPO` non configuré.")
         return
 
-    await ctx.send("🔄 Test de connexion en cours...")
+    await ctx.send("🔄 Synchronisation avec GitHub...")
 
-    try:
-        client = lbc.Client(proxy=proxy)
-        result = client.search(text="test", limit=1)
-        await ctx.send(f"✅ Proxy fonctionnel ! Connexion OK ({len(result.ads)} résultat)")
-    except lbc.DatadomeError:
-        await ctx.send("❌ Proxy bloqué par Datadome. Change de proxy ou attends.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur connexion: {e}")
+    data = load_searches()
+    success, message = commit_searches_to_github(data)
+
+    if success:
+        await ctx.send(f"✅ {message}")
+    else:
+        await ctx.send(f"❌ {message}")
 
 
 @bot.command(name="new")
@@ -460,7 +596,7 @@ async def handle_wizard(message):
                 "channel_id": wizard["channel_id"],
                 "created_at": datetime.now().isoformat(),
             }
-            save_searches(data)
+            result = save_searches(data)
 
             del user_wizards[user_id]
 
@@ -472,6 +608,8 @@ async def handle_wizard(message):
             if wizard["data"].get("year_min") or wizard["data"].get("year_max"):
                 year_str = f"{wizard['data'].get('year_min') or '?'} - {wizard['data'].get('year_max') or '?'}"
 
+            sync_status = "✅ Synchronisé avec GitHub" if (result and result[0]) else "⚠️ Non synchronisé"
+
             embed = discord.Embed(
                 title=f"✅ Recherche #{search_id} créée !",
                 color=0x00AA00,
@@ -481,7 +619,8 @@ async def handle_wizard(message):
             embed.add_field(name="📍 Région", value=reg_name, inline=True)
             embed.add_field(name="💰 Prix", value=price_str, inline=True)
             embed.add_field(name="📅 Année", value=year_str, inline=True)
-            embed.set_footer(text=f"Utilise !start {search_id} pour démarrer le monitoring")
+            embed.add_field(name="🔄 GitHub", value=sync_status, inline=True)
+            embed.set_footer(text=f"!start {search_id} pour activer | !run pour lancer maintenant")
             await message.channel.send(embed=embed)
 
         except ValueError:
@@ -569,19 +708,22 @@ async def delete_search(ctx, search_id: str = None):
         return
 
     del data["searches"][search_id]
-    save_searches(data)
+    result = save_searches(data)
 
     # Supprimer le fichier des annonces vues
     seen_file = get_seen_file(search_id)
     if seen_file.exists():
         seen_file.unlink()
 
-    await ctx.send(f"✅ Recherche #{search_id} supprimée.")
+    if result and result[0]:
+        await ctx.send(f"✅ Recherche #{search_id} supprimée et synchronisée avec GitHub.")
+    else:
+        await ctx.send(f"✅ Recherche #{search_id} supprimée.")
 
 
 @bot.command(name="start")
 async def start_search(ctx, search_id: str = None):
-    """Démarre une recherche."""
+    """Active une recherche."""
     if not search_id:
         await ctx.send("❌ Usage: `!start <id>`")
         return
@@ -593,14 +735,17 @@ async def start_search(ctx, search_id: str = None):
 
     data["searches"][search_id]["active"] = True
     data["searches"][search_id]["channel_id"] = ctx.channel.id
-    save_searches(data)
+    result = save_searches(data)
 
-    await ctx.send(f"✅ Recherche #{search_id} démarrée ! Vérification toutes les {CHECK_INTERVAL} min.")
+    if result and result[0]:
+        await ctx.send(f"✅ Recherche #{search_id} activée et synchronisée avec GitHub !")
+    else:
+        await ctx.send(f"✅ Recherche #{search_id} activée (sync GitHub: {result[1] if result else 'non configuré'})")
 
 
 @bot.command(name="stop")
 async def stop_search(ctx, search_id: str = None):
-    """Arrête une recherche."""
+    """Désactive une recherche."""
     if not search_id:
         await ctx.send("❌ Usage: `!stop <id>`")
         return
@@ -611,231 +756,45 @@ async def stop_search(ctx, search_id: str = None):
         return
 
     data["searches"][search_id]["active"] = False
-    save_searches(data)
+    result = save_searches(data)
 
-    await ctx.send(f"🛑 Recherche #{search_id} arrêtée.")
+    if result and result[0]:
+        await ctx.send(f"🛑 Recherche #{search_id} désactivée et synchronisée avec GitHub.")
+    else:
+        await ctx.send(f"🛑 Recherche #{search_id} désactivée.")
 
 
 @bot.command(name="startall")
 async def start_all(ctx):
-    """Démarre toutes les recherches."""
+    """Active toutes les recherches."""
     data = load_searches()
     count = 0
     for search_id in data["searches"]:
         data["searches"][search_id]["active"] = True
         data["searches"][search_id]["channel_id"] = ctx.channel.id
         count += 1
-    save_searches(data)
-    await ctx.send(f"✅ {count} recherche(s) démarrée(s) !")
+    result = save_searches(data)
+
+    if result and result[0]:
+        await ctx.send(f"✅ {count} recherche(s) activée(s) et synchronisée(s) avec GitHub !")
+    else:
+        await ctx.send(f"✅ {count} recherche(s) activée(s).")
 
 
 @bot.command(name="stopall")
 async def stop_all(ctx):
-    """Arrête toutes les recherches."""
+    """Désactive toutes les recherches."""
     data = load_searches()
     count = 0
     for search_id in data["searches"]:
         data["searches"][search_id]["active"] = False
         count += 1
-    save_searches(data)
-    await ctx.send(f"🛑 {count} recherche(s) arrêtée(s).")
+    result = save_searches(data)
 
-
-@bot.command(name="check")
-async def check_search(ctx, search_id: str = None):
-    """Lance une vérification immédiate."""
-    if not search_id:
-        await ctx.send("❌ Usage: `!check <id>`")
-        return
-
-    data = load_searches()
-    if search_id not in data["searches"]:
-        await ctx.send(f"❌ Recherche #{search_id} introuvable.")
-        return
-
-    await ctx.send(f"🔍 Vérification de la recherche #{search_id}...")
-    await do_check(search_id, data["searches"][search_id], ctx.channel)
-
-
-# =============================================================================
-# MONITORING
-# =============================================================================
-
-async def do_check(search_id: str, search: dict, channel):
-    """Effectue une vérification pour une recherche."""
-    try:
-        # Construire les paramètres
-        search_params = {
-            "text": search["text"],
-            "category": CATEGORIES[search["category_id"]][1],
-            "sort": lbc.Sort.NEWEST,
-        }
-
-        if search["price_min"] or search["price_max"]:
-            search_params["price"] = [search["price_min"] or 0, search["price_max"] or 999999999]
-
-        if search["region_id"]:
-            search_params["locations"] = [REGIONS[search["region_id"]][1]]
-
-        # Filtre année (regdate)
-        if search.get("year_min") or search.get("year_max"):
-            search_params["regdate"] = [search.get("year_min") or 1900, search.get("year_max") or 2100]
-
-        # Récupérer les annonces (avec proxy si configuré)
-        proxy = get_proxy()
-        client = lbc.Client(proxy=proxy)
-
-        if proxy:
-            print(f"[PROXY] Utilisation de {PROXY_HOST}:{PROXY_PORT}")
-
-        result = client.search(**search_params)
-        ads = result.ads
-
-        # Filtrer les nouvelles
-        seen_ids = load_seen_ads(search_id)
-        new_ads = [ad for ad in ads if str(ad.id) not in seen_ids]
-
-        if new_ads:
-            # Analyser chaque annonce pour trouver les pépites
-            pepites = []
-            normal_ads = []
-
-            for ad in new_ads:
-                if MARKET_ANALYSIS_ENABLED and ad.price:
-                    # Extraire les attributs
-                    year = None
-                    mileage = None
-                    for attr in ad.attributes:
-                        if attr.key == "regdate":
-                            year = attr.value_label or attr.value
-                        elif attr.key == "mileage":
-                            mileage = attr.value_label or attr.value
-
-                    # Analyser le marché
-                    try:
-                        market_analysis = analyze_ad(
-                            title=ad.title,
-                            price=ad.price,
-                            brand=ad.brand,
-                            year=year,
-                            category="moto" if search["category_id"] == 3 else None,
-                        )
-
-                        if market_analysis.is_good_deal:
-                            pepites.append((ad, market_analysis))
-                        else:
-                            normal_ads.append((ad, market_analysis))
-                    except Exception as e:
-                        print(f"[MARKET] Erreur analyse: {e}")
-                        normal_ads.append((ad, None))
-                else:
-                    normal_ads.append((ad, None))
-
-            # Afficher les PÉPITES en premier (en or!)
-            if pepites:
-                await channel.send(f"🏆 **{len(pepites)} PÉPITE(S) DÉTECTÉE(S)** pour *{search['text']}* :")
-
-                for ad, market in pepites[:5]:
-                    embed = discord.Embed(
-                        title=f"💎 {ad.title}",
-                        url=ad.url,
-                        color=0xFFD700,  # Or
-                    )
-                    embed.add_field(name="💰 Prix annonce", value=f"{int(ad.price)} €", inline=True)
-                    if market and market.market_price:
-                        embed.add_field(name="📊 Prix marché", value=f"{int(market.market_price)} €", inline=True)
-                        embed.add_field(name="📈 Profit potentiel", value=f"+{int(market.potential_profit)} €", inline=True)
-
-                    if ad.location and ad.location.city_label:
-                        embed.add_field(name="📍 Lieu", value=ad.location.city_label, inline=True)
-
-                    for attr in ad.attributes:
-                        if attr.key == "regdate":
-                            embed.add_field(name="📅 Année", value=attr.value_label or attr.value, inline=True)
-                        elif attr.key == "mileage":
-                            embed.add_field(name="🛣️ Km", value=attr.value_label or attr.value, inline=True)
-
-                    if ad.images and ad.images[0]:
-                        embed.set_thumbnail(url=ad.images[0])
-
-                    embed.set_footer(text=f"Recherche #{search_id} | {market.reason if market else ''}")
-                    await channel.send(embed=embed)
-                    seen_ids.add(str(ad.id))
-                    await asyncio.sleep(1)
-
-            # Afficher les annonces normales (résumé seulement)
-            if normal_ads:
-                skipped = len([a for a, m in normal_ads if m and not m.is_good_deal])
-                shown = 0
-
-                await channel.send(f"📋 **{len(normal_ads)} autre(s) annonce(s)** ({skipped} ignorée(s) car pas assez rentables)")
-
-                for ad, market in normal_ads[:5]:
-                    if market and not market.is_good_deal:
-                        # Ignorer les annonces pas rentables (juste compter)
-                        seen_ids.add(str(ad.id))
-                        continue
-
-                    shown += 1
-                    embed = discord.Embed(
-                        title=ad.title,
-                        url=ad.url,
-                        color=0x00AA00,
-                    )
-                    if ad.price:
-                        embed.add_field(name="💰 Prix", value=f"{int(ad.price)} €", inline=True)
-                    if ad.location and ad.location.city_label:
-                        embed.add_field(name="📍 Lieu", value=ad.location.city_label, inline=True)
-
-                    for attr in ad.attributes:
-                        if attr.key == "regdate":
-                            embed.add_field(name="📅 Année", value=attr.value_label or attr.value, inline=True)
-                        elif attr.key == "mileage":
-                            embed.add_field(name="🛣️ Km", value=attr.value_label or attr.value, inline=True)
-
-                    if ad.images and ad.images[0]:
-                        embed.set_thumbnail(url=ad.images[0])
-
-                    embed.set_footer(text=f"Recherche #{search_id}")
-                    await channel.send(embed=embed)
-                    seen_ids.add(str(ad.id))
-                    await asyncio.sleep(1)
-
-                # Marquer toutes les autres comme vues
-                for ad, _ in normal_ads[5:]:
-                    seen_ids.add(str(ad.id))
-
-            save_seen_ads(search_id, seen_ids)
-
-            if len(new_ads) > 10:
-                await channel.send(f"*...et {len(new_ads) - 10} autres annonces*")
-        else:
-            await channel.send(f"✅ Aucune nouvelle annonce pour *{search['text']}*.")
-
-    except lbc.DatadomeError:
-        await channel.send(f"⚠️ Recherche #{search_id}: Bloqué par Datadome. Réessayez plus tard.")
-    except Exception as e:
-        await channel.send(f"❌ Recherche #{search_id}: Erreur - {e}")
-
-
-@tasks.loop(minutes=CHECK_INTERVAL)
-async def monitor_loop():
-    """Boucle de monitoring automatique."""
-    data = load_searches()
-
-    for search_id, search in data["searches"].items():
-        if not search["active"] or not search.get("channel_id"):
-            continue
-
-        channel = bot.get_channel(search["channel_id"])
-        if channel:
-            await do_check(search_id, search, channel)
-            await asyncio.sleep(5)  # Pause entre les recherches
-
-
-@monitor_loop.before_loop
-async def before_monitor():
-    await bot.wait_until_ready()
+    if result and result[0]:
+        await ctx.send(f"🛑 {count} recherche(s) désactivée(s) et synchronisée(s) avec GitHub.")
+    else:
+        await ctx.send(f"🛑 {count} recherche(s) désactivée(s).")
 
 
 # =============================================================================
@@ -845,7 +804,11 @@ async def before_monitor():
 if __name__ == "__main__":
     if not TOKEN:
         print("Erreur: DISCORD_BOT_TOKEN non défini")
-        print("Utilisez: DISCORD_BOT_TOKEN=token python discord_bot.py")
+        print("Définir: DISCORD_BOT_TOKEN, GITHUB_TOKEN, GITHUB_REPO")
         exit(1)
+
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        print("⚠️  GITHUB_TOKEN ou GITHUB_REPO non défini")
+        print("   Le bot fonctionnera mais ne pourra pas synchroniser avec GitHub Actions")
 
     bot.run(TOKEN)
