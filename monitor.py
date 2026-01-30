@@ -517,7 +517,16 @@ def process_search(search_id: str, search: dict, simulate: bool = False) -> tupl
     Returns:
         Tuple (nouvelles_annonces, notifications_envoyees, pepites_detectees)
     """
-    print(f"\n[SEARCH #{search_id}] {search['text']}")
+    import time
+    import random
+
+    # Délai aléatoire pour éviter détection
+    if not simulate:
+        delay = random.uniform(3, 10)
+        print(f"\n[SEARCH #{search_id}] {search['text']} (attente {delay:.1f}s)")
+        time.sleep(delay)
+    else:
+        print(f"\n[SEARCH #{search_id}] {search['text']}")
 
     # 1. Récupérer les annonces
     try:
@@ -527,11 +536,11 @@ def process_search(search_id: str, search: dict, simulate: bool = False) -> tupl
             search_params = build_search_params(search)
             ads = fetch_data(search_params)
         print(f"  [INFO] {len(ads)} annonce(s) recuperee(s)")
-    except lbc.DatadomeError as e:
-        print(f"  [ERROR] Bloque par Datadome: {e}")
+    except lbc.DatadomeError:
+        print(f"  [SKIP] Bloque par Datadome")
         return 0, 0, 0
     except Exception as e:
-        print(f"  [ERROR] Erreur: {e}")
+        print(f"  [SKIP] Erreur: {e}")
         return 0, 0, 0
 
     # 2. Charger les annonces déjà vues pour cette recherche
