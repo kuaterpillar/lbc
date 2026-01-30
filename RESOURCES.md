@@ -76,3 +76,14 @@ Pour une library Python API, ces skills aident à :
 ---
 
 Généré le 2026-01-28 23:40 avec [Claude Code](https://claude.com/claude-code)
+
+### Groq (secret)
+Ne stocke **jamais** une clé API dans un fichier du projet (README/RESOURCES/…).
+Utilise une variable d’environnement :
+
+- PowerShell :
+  `$env:GROQ_API_KEY="gsk_..."`
+- cmd.exe :
+  `set GROQ_API_KEY=gsk_...`
+- bash :
+  `export GROQ_API_KEY="gsk_..."`
