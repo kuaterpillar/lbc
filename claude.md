@@ -47,24 +47,17 @@ python monitor.py --simulate   # Mode simulation
 | `lbc/utils.py` | `build_search_payload_with_args()` / `build_search_payload_with_url()` |
 | `lbc/model/enums.py` | `Category`, `Sort`, `Region`, `Department` |
 | `monitor.py` | Surveillance d'annonces + notifications Discord |
-| `market_analyzer.py` | Estimation prix marché via DuckDuckGo + détection pépites |
+| `market_analyzer.py` | Estimation prix marché via base locale + détection pépites |
 
 ## Market Analyzer (Analyse de Marché)
 
 Module d'analyse pour détecter les bonnes affaires en comparant le prix annonce vs prix marché.
 
 **Fonctionnement :**
-1. Recherche du prix marché via DuckDuckGo (`ddgs`)
-2. L'année de production est **toujours incluse** dans les requêtes pour des résultats précis
+1. Recherche du prix marché dans la base locale (`data/moto_prices.json`)
+2. Matching du titre d'annonce vers une clé modèle (ex: `HONDA_AFRICA_TWIN_1100`)
 3. Calcul de la marge potentielle (prix marché - prix annonce)
 4. Filtrage des "pépites" : marge ≥ 60% du prix d'achat ET marge ≥ 1000€
-
-**Requêtes DuckDuckGo (avec année) :**
-```
-"{marque} {modèle} {année} prix occasion france"
-"{marque} {modèle} {année} argus cote"
-"{marque} {modèle} {année} a vendre occasion"
-```
 
 **Usage :**
 ```python
@@ -84,7 +77,7 @@ result = analyze_ad(
 print(f"Pépite: {result.is_good_deal}, Profit: {result.potential_profit}€")
 ```
 
-**Dépendances :** `pip install ddgs`
+**Dépendances :** Aucune (base locale uniquement)
 
 ## Usage Examples
 
@@ -118,7 +111,7 @@ Le projet inclut un workflow GitHub Actions qui surveille LeBonCoin automatiquem
 **Fonctionnement:**
 1. Exécution automatique toutes les 15 minutes (cron)
 2. Recherche les nouvelles annonces via `monitor.py`
-3. Analyse de marché DuckDuckGo pour chaque annonce
+3. Analyse de marché via base locale pour chaque annonce
 4. Détection des pépites (marge ≥60% ET ≥1000€)
 5. Envoi notifications Discord (webhook)
 6. Sauvegarde des annonces vues dans `data/seen_ads.json`

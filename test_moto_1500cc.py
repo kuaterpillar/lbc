@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test: Recherche de motos 1500cc (2016-2025) en Île-de-France
-et analyse des bonnes affaires via DuckDuckGo.
+et analyse des bonnes affaires via base de données locale.
 """
 
 import sys
@@ -77,7 +77,7 @@ def main():
             print(f"[SKIP] Prix trop bas ({ad.price}€ < 500€)")
             continue
 
-        # Analyse de marché via DuckDuckGo
+        # Analyse de marché via base locale
         print(f"[...] Analyse du prix de marché (année: {year or 'N/A'})...")
 
         try:
@@ -103,8 +103,8 @@ def main():
         except Exception as e:
             print(f"  [ERREUR] Analyse échouée: {e}")
 
-        # Pause pour éviter le rate-limiting de DuckDuckGo
-        time.sleep(1)
+        # Petite pause entre les annonces
+        time.sleep(0.1)
 
     # Résumé final
     print("\n" + "=" * 60)

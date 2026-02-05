@@ -2,35 +2,56 @@
 """
 Module d'analyse de marché pour détecter les bonnes affaires.
 
-Fonctionnalités:
-1. Estimation du prix de marché via DuckDuckGo Search
-2. Filtrage des "pépites" selon la rentabilité:
-   - marge ≥ 60% du prix d'achat **ET**
-   - marge ≥ 1000€
+Utilise une base de données locale de prix (data/moto_prices.json)
+pour estimer le prix de marché sans appels API externes.
+
+Critères pépite:
+- marge >= 60% du prix d'achat ET marge >= 1000€
 """
 
+import json
 import re
-import statistics
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
-
-from ddgs import DDGS
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-# Seuil de rentabilité:
-# - marge (Prix_Marché - Prix_Annonce) ≥ 60% du prix d'achat
-# - ET marge ≥ 1000€
 PROFIT_MARGIN_PERCENT = 0.60  # 60% du prix d'achat
-PROFIT_MARGIN_FIXED = 1000    # 1000€ minimum de bénéfice
+PROFIT_MARGIN_FIXED = 1200    # 1200€ minimum
+MIN_AD_PRICE = 500            # Ignorer annonces < 500€
 
-# Prix minimum pour considérer une annonce (éviter les annonces douteuses)
-MIN_AD_PRICE = 500  # Ignorer les annonces < 500€
+PRICES_FILE = Path(__file__).parent / "data" / "moto_prices.json"
 
 # =============================================================================
-# STRUCTURES DE DONNÉES
+# CHARGEMENT BASE DE DONNÉES
+# =============================================================================
+
+_PRICES_DB: dict = {}
+
+def _load_prices_db() -> dict:
+    """Charge la base de données de prix."""
+    global _PRICES_DB
+    if _PRICES_DB:
+        return _PRICES_DB
+
+    if not PRICES_FILE.exists():
+        print(f"[WARN] Fichier prix introuvable: {PRICES_FILE}")
+        return {}
+
+    try:
+        with open(PRICES_FILE, encoding="utf-8") as f:
+            _PRICES_DB = json.load(f)
+        print(f"[MARKET] {len(_PRICES_DB)} modèles chargés")
+        return _PRICES_DB
+    except Exception as e:
+        print(f"[WARN] Erreur chargement prix: {e}")
+        return {}
+
+# =============================================================================
+# STRUCTURES
 # =============================================================================
 
 @dataclass
@@ -43,170 +64,102 @@ class MarketAnalysis:
     is_good_deal: bool
     reason: str
 
+# =============================================================================
+# MATCHING TITRE -> MODÈLE
+# =============================================================================
+
+def _normalize(text: str) -> str:
+    """Normalise un texte pour le matching."""
+    text = text.upper()
+    text = re.sub(r'[^A-Z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def _title_to_key(title: str) -> Optional[str]:
+    """
+    Convertit un titre d'annonce en clé de la base de données.
+
+    Ex: "Honda Africa Twin 1100 Adventure" -> "HONDA_AFRICA_TWIN_1100"
+    """
+    db = _load_prices_db()
+    if not db:
+        return None
+
+    title_norm = _normalize(title)
+
+    # Score de matching pour chaque modèle
+    best_match = None
+    best_score = 0
+
+    for key in db.keys():
+        # Convertir clé en mots: HONDA_AFRICA_TWIN_1100 -> ["HONDA", "AFRICA", "TWIN", "1100"]
+        key_words = key.split('_')
+
+        # Compter combien de mots de la clé sont dans le titre
+        score = 0
+        for word in key_words:
+            if word in title_norm:
+                score += 1
+
+        # Bonus si tous les mots sont présents
+        if score == len(key_words):
+            score += 10
+
+        # Prendre le meilleur match
+        if score > best_score and score >= 2:  # Au moins 2 mots en commun
+            best_score = score
+            best_match = key
+
+    return best_match
 
 # =============================================================================
-# ESTIMATION DU PRIX DE MARCHÉ
+# RECHERCHE PRIX
 # =============================================================================
 
-def search_market_price(product_name: str, year: Optional[str] = None) -> tuple[Optional[float], list[str]]:
+def search_market_price(title: str, year: Optional[str] = None) -> tuple[Optional[float], list[str]]:
     """
-    Recherche le prix de marché d'un produit via DuckDuckGo.
-
-    Args:
-        product_name: Nom du produit (ex: "Honda Goldwing 1500")
-        year: Année du produit (optionnel)
-
-    Returns:
-        Tuple (prix_moyen, liste_sources)
-    """
-    prices = []
-    sources = []
-
-    # Plusieurs requêtes pour maximiser les chances de trouver des prix
-    # L'année est TOUJOURS incluse quand disponible pour des résultats plus précis
-    if year:
-        queries = [
-            f"{product_name} {year} prix occasion france",
-            f"{product_name} {year} argus cote",
-            f"{product_name} {year} a vendre occasion",
-        ]
-    else:
-        queries = [
-            f"{product_name} prix occasion france",
-            f"{product_name} argus occasion",
-            f"{product_name} a vendre",
-        ]
-
-    try:
-        with DDGS() as ddgs:
-            for query in queries[:2]:  # Limiter à 2 requêtes pour la vitesse
-                results = list(ddgs.text(query, max_results=10))
-
-                for result in results:
-                    title = result.get("title", "")
-                    body = result.get("body", "")
-                    href = result.get("href", "")
-                    text = f"{title} {body}"
-
-                    # Extraire les prix - patterns multiples
-                    # Format: 1234€, 1 234 €, 1.234€, 1234 EUR, 1234 euros
-                    all_matches = []
-
-                    # Pattern 1: nombre + symbole euro (€ ou \u20ac)
-                    all_matches.extend(re.findall(r'(\d[\d\s\.\,\xa0]*\d)\s*[\u20ac€]', text))
-
-                    # Pattern 2: nombre + EUR/euros
-                    all_matches.extend(re.findall(r'(\d[\d\s\.\,\xa0]*\d)\s*(?:EUR|euros?)', text, re.IGNORECASE))
-
-                    # Pattern 3: nombre simple (3-6 chiffres) + euro
-                    all_matches.extend(re.findall(r'(\d{3,6})\s*[\u20ac€]', text))
-
-                    # Pattern 4: "à partir de X €"
-                    all_matches.extend(re.findall(r'(?:partir de|depuis|prix[:\s]+)(\d[\d\s]*)\s*[\u20ac€]', text, re.IGNORECASE))
-
-                    for match in all_matches:
-                        # Nettoyer: enlever espaces, points, virgules
-                        price_str = re.sub(r'[\s\.\,\xa0]', '', str(match))
-                        try:
-                            price = int(price_str)
-                            # Filtrer les prix aberrants
-                            if 500 <= price <= 80000:
-                                prices.append(price)
-                                if href and href not in sources:
-                                    sources.append(href)
-                        except ValueError:
-                            continue
-
-                # Si on a assez de prix, on arrête
-                if len(prices) >= 5:
-                    break
-
-    except Exception as e:
-        print(f"[MARKET] Erreur recherche: {e}")
-        return None, []
-
-    if not prices:
-        return None, sources
-
-    # Filtrer les outliers avec IQR (InterQuartile Range)
-    if len(prices) >= 4:
-        sorted_prices = sorted(prices)
-        q1 = sorted_prices[len(sorted_prices) // 4]
-        q3 = sorted_prices[3 * len(sorted_prices) // 4]
-        iqr = q3 - q1
-        lower_bound = q1 - 1.5 * iqr
-        upper_bound = q3 + 1.5 * iqr
-        prices = [p for p in prices if lower_bound <= p <= upper_bound]
-
-    if not prices:
-        return None, sources
-
-    # Calculer le prix médian (plus robuste que la moyenne)
-    median_price = statistics.median(prices)
-
-    return median_price, sources[:3]  # Retourner max 3 sources
-
-
-def estimate_market_price(
-    title: str,
-    brand: Optional[str] = None,
-    model: Optional[str] = None,
-    year: Optional[str] = None,
-    category: Optional[str] = None
-) -> tuple[Optional[float], list[str]]:
-    """
-    Estime le prix de marché d'une annonce.
+    Recherche le prix de marché dans la base locale.
 
     Args:
         title: Titre de l'annonce
-        brand: Marque (ex: "Honda")
-        model: Modèle (ex: "Goldwing")
-        year: Année
-        category: Catégorie (ex: "moto")
+        year: Année du véhicule
 
     Returns:
-        Tuple (prix_estimé, sources)
+        (prix_marché, ["Base locale"])
     """
-    # Construire le nom du produit
-    product_parts = []
+    db = _load_prices_db()
+    if not db:
+        return None, []
 
-    if brand:
-        product_parts.append(brand)
+    # Trouver le modèle correspondant
+    key = _title_to_key(title)
+    if not key or key not in db:
+        return None, []
 
-    # Extraire le modèle du titre si non fourni
-    if not model:
-        # Essayer d'extraire le modèle du titre
-        model = title
+    prices = db[key]
 
-    product_parts.append(model)
+    # Si année fournie, chercher le prix exact
+    if year:
+        year_str = str(year)
+        if year_str in prices:
+            price = prices[year_str]
+            if price > 0:
+                return float(price), [f"Base locale: {key}"]
 
-    if category:
-        product_parts.append(category)
+    # Sinon, prendre le prix le plus récent disponible
+    for y in sorted(prices.keys(), reverse=True):
+        if prices[y] > 0:
+            return float(prices[y]), [f"Base locale: {key} ({y})"]
 
-    product_name = " ".join(product_parts)
-
-    return search_market_price(product_name, year)
-
+    return None, []
 
 # =============================================================================
-# ANALYSE DE RENTABILITÉ
+# ANALYSE
 # =============================================================================
 
 def analyze_deal(ad_price: float, market_price: Optional[float], sources: list[str]) -> MarketAnalysis:
-    """
-    Analyse si une annonce est une bonne affaire.
+    """Analyse si une annonce est une bonne affaire."""
 
-    Règle: Prix_Marché > (Prix_Annonce * 1.6) + 1000€
-
-    Args:
-        ad_price: Prix de l'annonce
-        market_price: Prix de marché estimé
-        sources: Sources utilisées pour l'estimation
-
-    Returns:
-        MarketAnalysis avec les résultats
-    """
-    # Vérifier le prix minimum
     if ad_price < MIN_AD_PRICE:
         return MarketAnalysis(
             ad_price=ad_price,
@@ -214,7 +167,7 @@ def analyze_deal(ad_price: float, market_price: Optional[float], sources: list[s
             price_sources=sources,
             potential_profit=None,
             is_good_deal=False,
-            reason=f"Prix trop bas ({ad_price:.0f}€ < {MIN_AD_PRICE}€ minimum)"
+            reason=f"Prix < {MIN_AD_PRICE}€"
         )
 
     if market_price is None:
@@ -224,37 +177,19 @@ def analyze_deal(ad_price: float, market_price: Optional[float], sources: list[s
             price_sources=sources,
             potential_profit=None,
             is_good_deal=False,
-            reason="Impossible d'estimer le prix de marché"
+            reason="Modèle non reconnu"
         )
 
-    # Profit brut (en euros)
     potential_profit = market_price - ad_price
-
-    # Seuils de profit demandés
-    required_profit_pct = PROFIT_MARGIN_PERCENT * ad_price      # ex: 60% du prix d'achat
-    required_profit_abs = PROFIT_MARGIN_FIXED                   # ex: 1000€ minimum
-    min_required_profit = max(required_profit_pct, required_profit_abs)
-
-    # Ratio de profit pour affichage
+    required_profit = max(PROFIT_MARGIN_PERCENT * ad_price, PROFIT_MARGIN_FIXED)
     profit_ratio = potential_profit / ad_price if ad_price > 0 else 0
 
-    # Bonne affaire seulement si:
-    # - profit >= 60% du prix d'achat
-    # - ET profit >= 1000€
-    is_good_deal = potential_profit >= min_required_profit
+    is_good_deal = potential_profit >= required_profit
 
     if is_good_deal:
-        reason = (
-            f"PEPITE! Profit potentiel: {potential_profit:.0f}€ "
-            f"({profit_ratio*100:.0f}%, min requis: {min_required_profit:.0f}€)"
-        )
+        reason = f"PEPITE! +{potential_profit:.0f}€ ({profit_ratio*100:.0f}%)"
     else:
-        missing_value = max(0.0, min_required_profit - potential_profit)
-        reason = (
-            "Pas assez rentable. "
-            f"Il manque environ {missing_value:.0f}€ de marge pour atteindre le seuil "
-            f"({PROFIT_MARGIN_PERCENT*100:.0f}% et au moins {PROFIT_MARGIN_FIXED}€)."
-        )
+        reason = f"Marge insuffisante: {potential_profit:.0f}€"
 
     return MarketAnalysis(
         ad_price=ad_price,
@@ -264,11 +199,6 @@ def analyze_deal(ad_price: float, market_price: Optional[float], sources: list[s
         is_good_deal=is_good_deal,
         reason=reason
     )
-
-
-# =============================================================================
-# FONCTION PRINCIPALE D'ANALYSE
-# =============================================================================
 
 def analyze_ad(
     title: str,
@@ -280,55 +210,42 @@ def analyze_ad(
     """
     Analyse complète d'une annonce.
 
-    1. Estime le prix de marché via DuckDuckGo
-    2. Vérifie si c'est une bonne affaire (>60% + 1000€)
-
     Args:
         title: Titre de l'annonce
         price: Prix demandé
-        brand: Marque
+        brand: Marque (utilisé pour améliorer le matching)
         year: Année
-        category: Catégorie
+        category: Ignoré (pour compatibilité)
 
     Returns:
-        MarketAnalysis avec résultat
+        MarketAnalysis
     """
-    # 1. Estimer le prix de marché
-    market_price, sources = estimate_market_price(
-        title=title,
-        brand=brand,
-        year=year,
-        category=category
-    )
+    # Construire titre enrichi si marque fournie
+    search_title = title
+    if brand and brand.upper() not in title.upper():
+        search_title = f"{brand} {title}"
 
-    # 2. Analyser la rentabilité (prix marché vs prix annonce)
+    market_price, sources = search_market_price(search_title, year)
     return analyze_deal(price, market_price, sources)
-
 
 # =============================================================================
 # TEST
 # =============================================================================
 
 if __name__ == "__main__":
-    # Test avec une annonce fictive
-    print("Test du module market_analyzer")
+    print("Test market_analyzer (base locale)")
     print("=" * 50)
 
-    market_price, sources = search_market_price("Honda Goldwing 1500", "1995")
-    print(f"Prix marché Honda Goldwing 1500 (1995): {market_price}€")
-    print(f"Sources: {sources}")
+    tests = [
+        ("Honda Africa Twin 1100", 8000, "2022"),
+        ("BMW R 1250 GS Adventure", 14000, "2021"),
+        ("Yamaha MT-07", 4500, "2020"),
+        ("Kawasaki Z900", 5000, "2019"),
+        ("Triumph Street Triple 765 RS", 7000, "2022"),
+    ]
 
-    # Test analyse complète
-    analysis = analyze_ad(
-        title="Honda Goldwing 1500 SE",
-        price=2000,
-        brand="Honda",
-        year="1995",
-        category="moto"
-    )
-
-    print(f"\nAnalyse marché:")
-    print(f"  Prix annonce: {analysis.ad_price}€")
-    print(f"  Prix marché: {analysis.market_price}€")
-    print(f"  Bonne affaire: {analysis.is_good_deal}")
-    print(f"  Raison: {analysis.reason}")
+    for title, price, year in tests:
+        result = analyze_ad(title, price, year=year)
+        status = "PEPITE" if result.is_good_deal else "Normal"
+        market = f"{result.market_price:.0f}€" if result.market_price else "?"
+        print(f"{status:7} | {title[:35]:35} | {price}€ vs {market} | {result.reason}")

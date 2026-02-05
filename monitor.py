@@ -358,6 +358,31 @@ def filter_new_ads(ads: list[lbc.Ad], seen_ids: set[str]) -> list[lbc.Ad]:
 # =============================================================================
 
 
+# Mots-clés indiquant une moto accidentée / à réparer (potentielle bonne affaire)
+DAMAGED_KEYWORDS = [
+    "accident", "accidente", "accidenté", "accidentée",
+    "pour piece", "pour pièce", "pour pieces", "pour pièces",
+    "a reparer", "à réparer", "a remettre en etat", "à remettre en état",
+    "en panne", "ne demarre pas", "ne démarre pas",
+    "moteur hs", "boite hs", "boîte hs",
+    "epave", "épave", "sinistre", "sinistré", "sinistrée",
+    "non roulant", "non roulante",
+    "carte grise barree", "carte grise barrée",
+    "casse", "cassé", "cassée",
+    "chute", "chuté", "chutée", "chutee",
+    "tomber", "tombée", "tombee",
+    "sans ct", "sans controle technique",
+    "pieces a changer", "pièces à changer",
+    "beaucoup de travaux", "gros travaux",
+]
+
+
+def is_damaged_ad(ad: lbc.Ad) -> bool:
+    """Détecte si une annonce concerne un véhicule accidenté ou à réparer."""
+    text = f"{ad.title} {ad.body or ''}".lower()
+    return any(kw in text for kw in DAMAGED_KEYWORDS)
+
+
 def get_attribute_value(ad: lbc.Ad, key: str) -> str | None:
     """
     Récupère la valeur d'un attribut d'annonce par sa clé.
@@ -387,6 +412,7 @@ def format_discord_message(ad: lbc.Ad, market: MarketAnalysis | None = None) -> 
         Payload JSON pour l'API Discord webhooks.
     """
     is_pepite = market and market.is_good_deal
+    damaged = is_damaged_ad(ad)
 
     # Construction de la description
     description_parts = []
@@ -412,10 +438,16 @@ def format_discord_message(ad: lbc.Ad, market: MarketAnalysis | None = None) -> 
     if mileage:
         description_parts.append(f"**Kilometrage:** {mileage}")
 
+    if damaged:
+        description_parts.append("\n**⚠️ ATTENTION: Accidenté / À réparer**")
+
     description = "\n".join(description_parts)
 
-    # Embed Discord - couleur différente pour les pépites
-    if is_pepite:
+    # Embed Discord - couleur selon le type
+    if damaged:
+        title = f"🔴 ACCIDENTÉ: {ad.title}"
+        color = 0xFF0000  # Rouge
+    elif is_pepite:
         title = f"💎 PÉPITE: {ad.title}"
         color = 0xFFD700  # Or
     else:
