@@ -6,7 +6,7 @@ Utilise une base de données locale de prix (data/moto_prices.json)
 pour estimer le prix de marché sans appels API externes.
 
 Critères pépite:
-- marge >= 60% du prix d'achat ET marge >= 1000€
+- marge >= 60% du prix d'achat ET marge >= 1200€
 """
 
 import json

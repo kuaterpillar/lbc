@@ -134,7 +134,7 @@ def get_simulated_data() -> list[lbc.Ad]:
         {
             "list_id": 2847593847,
             "subject": "Honda CB 500 F - Excellent etat",
-            "price_cents": 200000,
+            "price_cents": 550000,
             "url": "https://www.leboncoin.fr/motos/2847593847.htm",
             "first_publication_date": "2025-01-28T10:30:00",
             "index_date": "2025-01-28T10:30:00",

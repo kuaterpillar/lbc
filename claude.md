@@ -46,8 +46,11 @@ python monitor.py --simulate   # Mode simulation
 | `lbc/client.py` | Client principal, `_fetch()` avec retry |
 | `lbc/utils.py` | `build_search_payload_with_args()` / `build_search_payload_with_url()` |
 | `lbc/model/enums.py` | `Category`, `Sort`, `Region`, `Department` |
-| `monitor.py` | Surveillance d'annonces + notifications Discord |
-| `market_analyzer.py` | Estimation prix marché via base locale + détection pépites |
+| `monitor.py` | Surveillance d'annonces + notifications Discord + détection accidentés |
+| `market_analyzer.py` | Estimation prix marché via base locale + détection pépites (≥1200€) |
+| `data/moto_prices.json` | Base de données locale : 156 modèles motos, prix par année (2013-2025) |
+| `data/searches.json` | Recherches actives configurées via le bot Discord |
+| `discord_bot.py` | Bot Discord pour gérer les recherches (ajout/suppression/activation) |
 
 ## Market Analyzer (Analyse de Marché)
 
@@ -57,7 +60,7 @@ Module d'analyse pour détecter les bonnes affaires en comparant le prix annonce
 1. Recherche du prix marché dans la base locale (`data/moto_prices.json`)
 2. Matching du titre d'annonce vers une clé modèle (ex: `HONDA_AFRICA_TWIN_1100`)
 3. Calcul de la marge potentielle (prix marché - prix annonce)
-4. Filtrage des "pépites" : marge ≥ 60% du prix d'achat ET marge ≥ 1000€
+4. Filtrage des "pépites" : marge ≥ 60% du prix d'achat ET marge ≥ 1200€
 
 **Usage :**
 ```python
@@ -112,9 +115,10 @@ Le projet inclut un workflow GitHub Actions qui surveille LeBonCoin automatiquem
 1. Exécution automatique toutes les 15 minutes (cron)
 2. Recherche les nouvelles annonces via `monitor.py`
 3. Analyse de marché via base locale pour chaque annonce
-4. Détection des pépites (marge ≥60% ET ≥1000€)
-5. Envoi notifications Discord (webhook)
-6. Sauvegarde des annonces vues dans `data/seen_ads.json`
+4. Détection des pépites (marge ≥60% ET ≥1200€)
+5. Détection des annonces accidentées (embed rouge Discord)
+6. Envoi notifications Discord (webhook)
+7. Sauvegarde des annonces vues dans `data/seen_{id}.json`
 
 **Secrets GitHub requis:**
 - `DISCORD_WEBHOOK_URL` : URL du webhook Discord
@@ -134,19 +138,33 @@ python monitor.py --simulate
 
 ## Configuration des Recherches
 
-Modifier `SEARCH_CONFIG` dans `monitor.py`:
+Les recherches sont configurées via le bot Discord (`discord_bot.py`) et stockées dans `data/searches.json`. Le moniteur charge automatiquement les recherches actives.
 
-```python
-SEARCH_CONFIG = {
-    "text": "honda",
-    "category": lbc.Category.VEHICULES_MOTOS,
-    "sort": lbc.Sort.NEWEST,
-    "price": [1000, 10000],           # Fourchette prix
-    "regdate": [2016, 2025],          # Années
-    "cubic_capacity": [1400, 1600],   # Cylindrée (motos)
-    "locations": lbc.Region.ILE_DE_FRANCE,
+```json
+// data/searches.json (géré par le bot Discord)
+{
+    "searches": {
+        "4": {
+            "text": "honda moto",
+            "category_id": 3,
+            "region_id": 1,
+            "price_min": 500,
+            "price_max": 15000,
+            "active": true
+        }
+    },
+    "next_id": 5
 }
 ```
+
+## Détection des Accidentés
+
+Le moniteur détecte automatiquement les annonces de véhicules accidentés ou à réparer via une liste de mots-clés (~30 termes). Ces annonces reçoivent un embed Discord **rouge** avec le préfixe "ACCIDENTÉ:".
+
+**Couleurs Discord :**
+- Vert (`0x00AA00`) : annonce normale
+- Or (`0xFFD700`) : pépite (bonne affaire détectée)
+- Rouge (`0xFF0000`) : véhicule accidenté / à réparer
 
 ## Important Notes
 
