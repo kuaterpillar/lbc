@@ -80,37 +80,55 @@ def _title_to_key(title: str) -> Optional[str]:
     Convertit un titre d'annonce en clé de la base de données.
 
     Ex: "Honda Africa Twin 1100 Adventure" -> "HONDA_AFRICA_TWIN_1100"
+
+    Utilise un matching strict par séquence :
+    - Les mots de la clé doivent apparaître dans l'ordre dans le titre
+    - TOUS les mots de la clé doivent être présents
+    - En cas d'égalité, la clé la plus longue (plus spécifique) est privilégiée
     """
     db = _load_prices_db()
     if not db:
         return None
 
     title_norm = _normalize(title)
+    title_words = title_norm.split()
 
-    # Score de matching pour chaque modèle
-    best_match = None
-    best_score = 0
+    # Chercher tous les modèles qui matchent complètement
+    valid_matches = []
 
     for key in db.keys():
         # Convertir clé en mots: HONDA_AFRICA_TWIN_1100 -> ["HONDA", "AFRICA", "TWIN", "1100"]
         key_words = key.split('_')
 
-        # Compter combien de mots de la clé sont dans le titre
-        score = 0
-        for word in key_words:
-            if word in title_norm:
-                score += 1
+        # Vérifier que TOUS les mots de la clé apparaissent dans l'ordre dans le titre
+        title_idx = 0
+        matched_count = 0
 
-        # Bonus si tous les mots sont présents
-        if score == len(key_words):
-            score += 10
+        for key_word in key_words:
+            # Chercher ce mot à partir de la position courante dans le titre
+            found = False
+            for i in range(title_idx, len(title_words)):
+                if key_word == title_words[i]:
+                    title_idx = i + 1  # Continuer après ce mot
+                    matched_count += 1
+                    found = True
+                    break
 
-        # Prendre le meilleur match
-        if score > best_score and score >= 2:  # Au moins 2 mots en commun
-            best_score = score
-            best_match = key
+            if not found:
+                # Ce mot de la clé n'est pas dans le titre (ou pas dans l'ordre)
+                break
 
-    return best_match
+        # Si TOUS les mots de la clé sont présents dans l'ordre, c'est un match valide
+        if matched_count == len(key_words):
+            valid_matches.append(key)
+
+    # Si aucun match valide, retourner None
+    if not valid_matches:
+        return None
+
+    # Tiebreaker : prendre la clé la plus longue (plus spécifique)
+    # Ex: HONDA_AFRICA_TWIN_1100_ADVENTURE est plus spécifique que HONDA_AFRICA_TWIN_1100
+    return max(valid_matches, key=lambda k: len(k.split('_')))
 
 # =============================================================================
 # RECHERCHE PRIX
@@ -233,8 +251,51 @@ def analyze_ad(
 # =============================================================================
 
 if __name__ == "__main__":
-    print("Test market_analyzer (base locale)")
-    print("=" * 50)
+    print("=" * 80)
+    print("TEST 1: Validation du matching strict par séquence (_title_to_key)")
+    print("=" * 80)
+
+    # Tests de matching strict
+    matching_tests = [
+        # (titre, clé_attendue, description)
+        ("Honda Africa Twin 1100 Adventure", "HONDA_AFRICA_TWIN_1100", "Match complet"),
+        ("Honda CB500X 2022", "HONDA_CB500X", "Match CB500X"),
+        ("Honda CB500X 2022", None, "NE DOIT PAS matcher AFRICA_TWIN (faux positif)"),
+        ("BMW R 1250 GS", "BMW_R_1250_GS", "Match BMW R 1250 GS"),
+        ("BMW R 1250 GS Adventure", "BMW_R_1250_GS_ADVENTURE", "Tiebreaker: cle plus longue (plus specifique)"),
+        ("Yamaha MT-07", "YAMAHA_MT_07", "Match modele simple"),
+        ("Honda Goldwing 1800 Touring", "HONDA_GOLDWING_1800_TOURING", "Match Goldwing"),
+        ("Kawasaki Ninja 650", "KAWASAKI_NINJA_650", "Match Ninja"),
+    ]
+
+    print(f"\n{'TITRE':<40} | {'CLÉ TROUVÉE':<30} | {'STATUT'}")
+    print("-" * 80)
+
+    for title, expected_key, description in matching_tests:
+        found_key = _title_to_key(title)
+
+        # Vérifier les cas spéciaux (faux positifs à éviter)
+        if "NE DOIT PAS" in description:
+            # Pour Honda CB500X, vérifier qu'il ne matche PAS AFRICA_TWIN
+            if found_key and "AFRICA_TWIN" in found_key:
+                status = "FAIL (faux positif)"
+            elif found_key == "HONDA_CB500X":
+                status = "OK (match correct)"
+            else:
+                status = "OK (pas de match)"
+        else:
+            # Cas normaux
+            if found_key == expected_key:
+                status = "OK"
+            else:
+                status = f"FAIL (attendu: {expected_key})"
+
+        display_key = found_key if found_key else "Aucun match"
+        print(f"{title:<40} | {display_key:<30} | {status}")
+
+    print("\n" + "=" * 80)
+    print("TEST 2: Analyse de marché complète")
+    print("=" * 80)
 
     tests = [
         ("Honda Africa Twin 1100", 8000, "2022"),
@@ -244,8 +305,12 @@ if __name__ == "__main__":
         ("Triumph Street Triple 765 RS", 7000, "2022"),
     ]
 
+    print(f"\n{'STATUT':<8} | {'TITRE':<35} | {'PRIX':<15} | {'RAISON'}")
+    print("-" * 80)
+
     for title, price, year in tests:
         result = analyze_ad(title, price, year=year)
         status = "PEPITE" if result.is_good_deal else "Normal"
         market = f"{result.market_price:.0f}€" if result.market_price else "?"
-        print(f"{status:7} | {title[:35]:35} | {price}€ vs {market} | {result.reason}")
+        price_str = f"{price}€ vs {market}"
+        print(f"{status:8} | {title[:35]:35} | {price_str:15} | {result.reason}")
